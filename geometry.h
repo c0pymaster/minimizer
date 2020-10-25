@@ -24,7 +24,7 @@ interval mymax(const interval & a, const interval & b) {
 	return interval(max(Inf(a), Inf(b)), max(Sup(a), Sup(b)));
 }
 
-// return the sign of the real number x;
+// return the sign of real number x;
 // if the sign cannot be determined, return 0
 int getSign(const interval & x) {
 	if (Inf(x) <= 0 and 0 <= Sup(x)) { // sign cannot be determined
@@ -84,9 +84,9 @@ struct point {
 	point normalize() const {
 		interval l = len();
 
-		// check that the length of the vector is not zero
-		assert(Inf(l) > 0);
-
+		// check that the length of the vector is positive
+		assert(getSign(l) == 1);
+		
 		return point(x / l, y / l);
 	}
 
@@ -95,24 +95,16 @@ struct point {
 		return point(-y, x);
 	}
 
-	// return the vector, rotated by angle radians counter-clockwise, where cos(angle) = cosa, sin(angle) = sina
+	// return the vector, rotated by a radians counter-clockwise, where cos(a) = cosa, sin(a) = sina
 	point rotate(const interval & cosa, const interval & sina) const {
 		return point(x * cosa - y * sina, x * sina + y * cosa);
 	}
 
-	// return the vector, rotated by angle radians counter-clockwise
-	point rotate(const interval & angle) const {
-		return rotate(cos(angle), sin(angle));
+	// return the vector, rotated by a radians counter-clockwise
+	point rotate(const interval & a) const {
+		return rotate(cos(a), sin(a));
 	}
 };
-
-// debug output
-void eprint(const vector<point> & p) {
-	for (int i = 0; i < (int) p.size(); ++i) {
-		cerr << "(" << p[i].x << ", " << p[i].y << ")\n";
-	}
-	cerr.flush();
-}
 
 // a line on a plane, described by a vector equation o + v * t, where t is the parameter
 struct line {
@@ -120,7 +112,7 @@ struct line {
 
 	line(): o(), v() {}
 
-	// construct the line passing through two points a and b
+	// construct the line passing through points a and b
 	line(const point & a, const point & b) {
 		o = a;
 		v = (b - a).normalize();
@@ -138,18 +130,18 @@ struct line {
 	}
 };
 
-// intersect line l and the circle with center o and radius r;
+// intersect line l and circle with center o and radius r;
 // assume the intersection is not empty
 void intersect(const line & l, const point & o, const interval & r, point res[2]) {
-	point n = l.v.rotate90();
 	// n is the normal vector of line l
+	point n = l.v.rotate90();
 	
 	interval d = l.dist(o);
 	interval x = sqrt(mymax(interval(0), power(r, 2) - power(d, 2)));
 	for (int it = 0; it < 2; ++it) {
 		res[it] = o + n * d + l.v * (it ? -x : x);
 
-		// the found points should lie both on the circle and on the line
+		// found points should lie both on the circle and on the line
 		assert(getSign(r - (o - res[it]).len()) == 0 && getSign(l.dist(res[it])) == 0);
 	}
 }
@@ -165,7 +157,7 @@ point intersect(const line & a, const line & b) {
 	interval kb = (a.v ^ a.o) / coeff;
 	point res = a.v * ka + b.v * kb;
 
-	// the found point should lie on both given lines
+	// found point should lie on both given lines
 	assert(getSign(a.dist(res)) == 0 && getSign(b.dist(res)) == 0);
 
 	return res;
@@ -174,12 +166,12 @@ point intersect(const line & a, const line & b) {
 // get the perpendicular bisector to the segment ab
 line getPerpendicularBisector(const point & a, const point & b) {
 	line l;
-	l.o = (a + b) * interval(0.5);
+	l.o = (a + b) * cos60;
 	l.v = (b - a).rotate90().normalize();
 	return l;
 }
 
-// get the circle that passes through points a, b, c (assume that the circle exists)
+// get the circle that passes through points a, b, c (assume that such circle exists)
 void getCircle(const point & a, const point & b, const point & c, point & o, interval & r) {
 	o = intersect(getPerpendicularBisector(a, b), getPerpendicularBisector(a, c));
 	r = (a - o).len();

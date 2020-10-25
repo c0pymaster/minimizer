@@ -12,104 +12,115 @@
 #include <future>
 #include <chrono>
 #include <queue>
+#include <fstream>
+#include <sstream>
 #include <iostream>
 #include <string>
 #include <set>
 
 #define eprintf(...) fprintf(stderr, __VA_ARGS__), fflush(stderr)
+#define sz(a) ((int) (a).size())
 
 const int maxDepth = 20;
-const int maxThreads = 64;
 
 using namespace std;
 using namespace cxsc;
 
-// usage: ./main A_1Degs k radiusXY radiusAlpha cutoffDepth threads
-
-// The program verifies that for every point (x, y, alpha, xi_up, xi_1, xi_2) in the parametric space,
-// such that |x - x_0| > radiusXY, |y - y_0| > radiusXY, |alpha - alpha_0| > radiusAlpha,
-// H(Sigma \cap ANGLE) >= H(Sigma_0 \cap ANGLE).
+// usage: ./main threads
+// Parameter threads is the number of threads used. If threads = 0, the program tries
+// to guess the number of concurrent threads supported by the machine.
 //
-// A_1Degs is angle A_1 in degrees.
+// The program verifies that L(p) >= L_0 for every point p = (x, y, alpha, xi, xi_1, xi_2) in P \ P_0.
 //
-// The parametric space is initially divided into k^6 hyperrectangles.
-// Each of these initial hyperrectangles is considered as a separate task.
+// It is assumed that r = 1 (all the points can be scaled by 1 / r, if it is not so).
+//
 // Tasks are run in parallel using multiple threads.
+// Each task corresponds to a box, the initial task corresponds to the whole parametric space.
 //
-// threads is the number of threads used. If threads = 0, the program tries
-// to guess the number of concurrent threads, supported by the machine.
-//
-// cutoffDepth is the maximum allowed recursive depth:
-// if the recursive depth for some hyperrectangle exceeds cutoffDepth,
-// the program needs to be restarted with higher cutoffDepth.
+// For each task the program either verifies the inequality for all points in the corresponding box,
+// or splits the box into 64 smaller boxes and considers each of them as a separate task.
+// The box (task) of depth i is the box which was obtained from the initial task by i splits.
 //
 // Interval arithmetics are used to ensure that all computations are correct
 // (see http://www.xsc.de for information on the library used).
 
 // a point in the parametric space
 struct point6d {
-    interval x, y, alpha, xi_up, xi_1, xi_2;
+    interval x, y, alpha, xi, xi_1, xi_2;
 
     point6d() {}
     point6d(const interval & x, const interval & y, const interval & alpha,
-            const interval & xi_up, const interval & xi_1, const interval & xi_2):
-                x(x), y(y), alpha(alpha), xi_up(xi_up), xi_1(xi_1), xi_2(xi_2) {}
+            const interval & xi, const interval & xi_1, const interval & xi_2):
+                x(x), y(y), alpha(alpha), xi(xi), xi_1(xi_1), xi_2(xi_2) {}
 
     // return the point, multiplied by the constant
     point6d operator *(const interval & m) const {
-        return point6d(x * m, y * m, alpha * m, xi_up * m, xi_1 * m, xi_2 * m);
+        return point6d(x * m, y * m, alpha * m, xi * m, xi_1 * m, xi_2 * m);
     }
 
     // return the sum of two points
     point6d operator +(const point6d & p) const {
-        return point6d(x + p.x, y + p.y, alpha + p.alpha, xi_up + p.xi_up, xi_1 + p.xi_1, xi_2 + p.xi_2);
+        return point6d(x + p.x, y + p.y, alpha + p.alpha, xi + p.xi, xi_1 + p.xi_1, xi_2 + p.xi_2);
     }
 };
 
+ostream & operator <<(ostream & os, const point6d & p) {
+   os << p.x << ' ' << p.y << ' ' << p.alpha << ' ' << p.xi << ' ' << p.xi_1 << ' ' << p.xi_2;
+   return os;
+}
+
+istream & operator >>(istream & is, point6d & p) {
+    is >> p.x >> p.y >> p.alpha >> p.xi >> p.xi_1 >> p.xi_2;
+    return is;
+}
+
 struct Verifier {
-    // angle A_1 in degrees and radians
-    interval A_1Degs, A_1;
-
-    // direction vectors of lines A_1A_2 and A_1A_3
-    point A_1A_2Dir, A_1A_3Dir;
+    // dimensions of P_0
+    interval radXY = interval(1) / interval(10), radAlpha = interval(1) / interval(30);
     
-    interval radiusXY, radiusAlpha;
-
     // sum of alpha and beta
-    interval sumAlphaBeta;
+    interval sumAlphaBeta = pi * 11 / 12;
 
-    // d = |A_1D_11| = |A_1D_12|
-    interval d;
+    // d = |A_1C_1| = |A_1C_2|
+    interval d = interval(4) / sqrt(interval(6)) + interval(4);
 
-    int k, cutoffDepth;
+    int threads;
 
-    // H(Sigma_0 \cap ANGLE), x_0, y_0, and alpha_0
-    interval minLength, x_0, y_0, alpha_0;
+    // x_0, y_0, alpha_0, and L_0 (L_0 is calculated in init method)
+    interval x_0 = sqrt(interval(2)), y_0 = sqrt(interval(2)), alpha_0 = pi * 11 / 24, L_0;
 
-    // deltas[i] stores the delta values for the hyperrectangle,
-    // which is 2^i times smaller in each dimension than the initial hyperrectangle
+    // deltas[i] stores the delta values for the box of depth i
     vector<point6d> deltas;
 
-    // shift[i] is the list of the vectors from the center of the hyperrectangle,
-    // which is 2^i times smaller in each dimension than the initial hyperrectangle,
-    // to the centers of 64 smaller hyperrectangles into which it is divided
+    // shift[i] is the list of the vectors from the center of the box of depth i
+    // to the centers of 64 smaller boxes into which it is divided;
     vector<vector<point6d> > shift;
 
-    // thread pool maintains the queue of tasks and distributes them among threads
+    // thread pool maintains a stack of tasks for each depth and distributes them among threads;
+    // tasks of higher depth have higher priority
     struct ThreadPool {
         vector<thread> threadPool;
-        queue<point6d> tasks;
+
+        // tasks[i] is the stack of tasks of depth i
+        vector<vector<point6d> > tasks;
+
+        // total amount of tasks in all stacks
+        int tasksAmount;
+
         mutex tasksMutex;
         condition_variable condition;
         atomic_bool terminate;
         atomic_bool stopped;
         
+        // initialize threads
         void init(int threads, Verifier *verifier) {
             terminate = false;
             stopped = false;
 
+            tasksAmount = 0;
+
             for (int i = 0; i < threads; i++) {
-                threadPool.emplace_back(thread(&ThreadPool::Runner, this, i, verifier));
+                threadPool.emplace_back(thread(&ThreadPool::Runner, this, verifier));
             }
         }
 
@@ -119,17 +130,20 @@ struct Verifier {
             }
         }
 
-        // add new task to queue
-        void Enqueue(point6d task) {
+        // add a new task of depth d with the center at t
+        void addTask(const point6d & t, int d) {
             {
                 unique_lock<mutex> lock(tasksMutex);
-                tasks.push(task);
+                for (; sz(tasks) <= d; tasks.push_back(vector<point6d>()));
+                tasks[d].push_back(t);
+                ++tasksAmount;
             }
 
-            // wake up one (random) thread for task.
+            // wake up one (random) thread.
             condition.notify_one();
         }
 
+        // terminate all threads
         void ShutDown() {
             terminate = true;
             condition.notify_all();
@@ -142,119 +156,139 @@ struct Verifier {
             stopped = true;
         }
 
-        void Runner(int id, Verifier *verifier) {
-            verifier->progressKeeper.currentDepth[id] = -1;
-            point6d task;
+        // the function run by each thread; takes a task with highest available depth and runs it;
+        // idle if no tasks are pending
+        void Runner(Verifier *verifier) {
+            point6d t;
+            int depth;
+            Melzak melzak;
 
             while (true) {
                 {
                     unique_lock<mutex> lock(tasksMutex);
 
-                    condition.wait(lock, [this] { return !tasks.empty() || terminate; });
+                    condition.wait(lock, [this] { return tasksAmount > 0 || terminate; });
 
-                    if (terminate && tasks.empty()) {
+                    if (terminate) {
                         return;
                     }
 
-                    task = tasks.front();
-                    tasks.pop();
+                    for (int i = sz(tasks) - 1; i >= 0; --i) {
+                        if (sz(tasks[i]) > 0) {
+                            depth = i;
+                            t = *tasks[i].rbegin();
+                            tasks[i].pop_back();
+                            --tasksAmount;
+                            break;
+                        }
+                    }
                 }
 
-                verifier->verify(task, id);
+                {
+                    unique_lock<mutex> lock(verifier->timeMutex);
+                    verifier->lastTaskTaken[depth] = chrono::steady_clock::now();
+                }
+
+                // run the chosen task
+                verifier->checkBox(t, melzak, depth);
+                --verifier->tasksToProcess[depth];
+                ++verifier->tasksProcessed[depth];
             }
         }
     } pool;
 
-    // shows current progress in the terminal
-    struct ProgressKeeper {
-        // the number of threads
-        int threads;
+    // tasksProcessed[i] is the amount of processed tasks of depth i
+    atomic_llong tasksProcessed[maxDepth];
+    // tasksToProcess[i] is the amount of tasks added but not yet processed
+    atomic_llong tasksToProcess[maxDepth];
 
-        // currentDepth[i] is the current depth of recursion in thread i
-        atomic_int currentDepth[maxThreads];
+    // time point of the start of the program
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
 
-        // casesLeft[i][j] is the number of cases left to consider in function on recursive depth j in thread i
-        atomic_int casesLeft[maxThreads][maxDepth];
+    // time point of last save
+    chrono::steady_clock::time_point lastSave = chrono::steady_clock::now();
 
-        // the amount of finished tasks
-        atomic_int tasksFinishedAnyDepth;
+    // lastTaskTaken[i] is the time point of the latest moment when
+    // a task of depth i has been taken
+    chrono::steady_clock::time_point lastTaskTaken[maxDepth];
+    mutex timeMutex;
 
-        // tasksFinished[i] is the number of finished tasks which had maximum reached recursive depth i
-        atomic_int tasksFinished[maxDepth];
+    // return the amount of seconds elapsed since the timePoint
+    int getSecondsElapsed(const chrono::steady_clock::time_point & timePoint) {
+        return (int) chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now() - timePoint).count();
+    }
 
-        // total amount of tasks
-        int tasksTotal;
+    // print to the terminal the time elapsed since the timePoint
+    void eprintTimeElapsed(const chrono::steady_clock::time_point & timePoint) {
+        int seconds = getSecondsElapsed(timePoint);
+        int minutes = seconds / 60, hours = minutes / 60;
+        seconds %= 60, minutes %= 60;
+        eprintf("%4d:%02d:%02d", hours, minutes, seconds);
+    }
 
-        chrono::steady_clock::time_point start = chrono::steady_clock::now();
-        mutex timeMutex;
-        chrono::steady_clock::time_point threadStart[maxThreads];
-
-        // show the time elapsed since the start of the program (if id = -1),
-        // or since the start of the last task in thread id (if id >= 0)
-        void eprintTimeElapsed(int id) {
-            unique_lock<mutex> lock(timeMutex);
-
-            int seconds = (int) chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now() - (id == -1 ? start : threadStart[id])).count();    
-            int minutes = seconds / 60, hours = minutes / 60;
-            seconds %= 60, minutes %= 60;
-            eprintf("%02d:%02d:%02d", hours, minutes, seconds);
+    // save to the file the amount of tasks processed and current stack for each depth
+    void save() {
+        lastSave = chrono::steady_clock::now();
+        ofstream saveFile;
+        saveFile.open("save.txt", ios_base::out);
+        saveFile << SetPrecision(18, 15);
+        for (int i = 0; i < maxDepth; ++i) {
+            saveFile << tasksProcessed[i].load() << ' ';
         }
-
-        // thread id started the new task
-        void setThreadStart(int id) {
-            unique_lock<mutex> lock(timeMutex);
-            threadStart[id] = chrono::steady_clock::now();
+        saveFile << '\n';
+        {
+            unique_lock<mutex> lock(pool.tasksMutex);
+            for (int i = sz(pool.tasks) - 1; i >= 0; --i) {
+                for (auto t : pool.tasks[i]) {
+                    saveFile << t << ' ' << i << '\n';
+                }
+            }
         }
+        saveFile.close();
+    }
 
-        // once a second show current progress in the terminal
-        void show(Verifier *verifier) {
-            while (true) {
-                eprintf("\33[2J\33[H");
-                eprintf("time elapsed: ");
-                eprintTimeElapsed(-1);
-                eprintf("\n");
-                for (int i = 0; i < threads; ++i) {
-                    eprintf("thread %d: ", i);
-                    int depth = currentDepth[i].load();
-                    if (depth == -1) {
-                        eprintf("on standby\n");
-                        continue;
-                    }
-                    eprintf("time spent on current task: ");
-                    eprintTimeElapsed(i);
-                    eprintf(" | current depth: %d", depth);
-                    if (depth > 0) {
-                        eprintf(" | cases left on depths 0..%d: ", depth - 1);
-                        for (int j = 0; j < depth; ++j) {
-                            eprintf("%02d", casesLeft[i][j].load());
-                            if (j < depth - 1) {
-                                eprintf(", ");
-                            }
+    // once a second show current progress in the terminal
+    void show() {
+        while (true) {
+            eprintf("\33[2J\33[H");
+            eprintf("time elapsed: ");
+            eprintTimeElapsed(start);
+            eprintf("\nlast save was made %d second(s) ago\n", getSecondsElapsed(lastSave));
+
+            bool noTasksLeft = true;
+
+            {
+                unique_lock<mutex> lock(timeMutex);
+                for (int i = 0; i < maxDepth; ++i) {
+                    if (tasksProcessed[i].load() != 0 || tasksToProcess[i].load() != 0) {
+                        eprintf("depth %2d: %18lld task(s) processed, %18lld task(s) pending", i, tasksProcessed[i].load(), tasksToProcess[i].load());
+                        if (tasksToProcess[i].load() != 0) {
+                            noTasksLeft = false;
+                            eprintf(", time since last task was taken:");
+                            eprintTimeElapsed(lastTaskTaken[i]);
+                            eprintf("\n");
+                        } else {
+                            eprintf("\n");
                         }
                     }
-                    eprintf("\n");
                 }
-                eprintf("%d/%d tasks finished, among them:\n", tasksFinishedAnyDepth.load(), tasksTotal);
-                for (int i = 0; i <= verifier->cutoffDepth; ++i) {
-                    if (tasksFinished[i].load() != 0) {
-                        eprintf("reached maximum depth %d: %d tasks\n", i, tasksFinished[i].load());
-                    }
-                }
-                if (tasksFinished[verifier->cutoffDepth + 1].load() != 0) {
-                    eprintf("\033[1;31mexceeded maximum allowed depth: %d tasks\033[0m", tasksFinished[verifier->cutoffDepth + 1].load());
-                }
-                if (tasksFinishedAnyDepth.load() == tasksTotal) {
-                    break;
-                }
-                this_thread::sleep_for(chrono::milliseconds(1000));
             }
 
-            eprintf("\n");
+            // once a minute save current progress to the file
+            if (getSecondsElapsed(lastSave) >= 60) {
+                save();
+            }
+
+            if (noTasksLeft) {
+                break;
+            }
+            this_thread::sleep_for(chrono::milliseconds(1000));
         }
-    } progressKeeper;
 
+        eprintf("\n");
+    }
 
-    // the part of the cycle C: Z_1-W_1-V-W_2-Z_2
+    // part of the cycle: Z_1-W_1-V-W_2-Z_2
     struct cyclePart {
         // lines through segments Z_1W_1 and Z_2W_2;
         // Z_1W_1.o = W_1, Z_2W_2.o = W_2
@@ -266,202 +300,171 @@ struct Verifier {
 
         cyclePart() {}
 
-        // find lines Z_1W_1, Z_2W_2 and point V, given x, y, alpha
+        // given x, y, alpha, find lines Z_1W_1, Z_2W_2 and point V
         cyclePart(const interval & x, const interval & y, const interval & alpha, Verifier *verifier) {
             interval beta = verifier->sumAlphaBeta - alpha;
 
             // W_1 and W_2
-            Z_1W_1.o = verifier->A_1A_2Dir * x + verifier->A_1A_2Dir.rotate(alpha);
-            Z_2W_2.o = verifier->A_1A_3Dir * y + verifier->A_1A_3Dir.rotate(-beta);
+            Z_1W_1.o = point(x + cos(alpha), sin(alpha));
+            Z_2W_2.o = point(sin(beta), y + cos(beta));
             
-            Z_1W_1.v = verifier->A_1A_2Dir.rotate(2 * alpha);
-            Z_2W_2.v = verifier->A_1A_3Dir.rotate(-2 * beta);
+            Z_1W_1.v = point(cos(2 * alpha), sin(2 * alpha));
+            Z_2W_2.v = point(sin(2 * beta), cos(2 * beta));
             V = intersect(Z_1W_1, Z_2W_2);
 
-            len = verifier->d - (Z_1W_1.o * verifier->A_1A_2Dir);
-            len += verifier->d - (Z_2W_2.o * verifier->A_1A_3Dir);
+            len = verifier->d - Z_1W_1.o.x + verifier->d - Z_2W_2.o.y;
             len += (V - Z_1W_1.o).len() + (V - Z_2W_2.o).len();
         }
     };
 
+    // initialize verifier
     void init(char** argv) {
-        ("[" + string(argv[1]) + ", " + string(argv[1]) + "]") >> A_1Degs;
-        sscanf(argv[2], "%d", &k);
-        ("[" + string(argv[3]) + ", " + string(argv[3]) + "]") >> radiusXY;
-        ("[" + string(argv[4]) + ", " + string(argv[4]) + "]") >> radiusAlpha;
-        sscanf(argv[5], "%d", &cutoffDepth);
-        sscanf(argv[6], "%d", &progressKeeper.threads);
+        sscanf(argv[1], "%d", &threads);
         
-        if (progressKeeper.threads == 0) {
-            progressKeeper.threads = thread::hardware_concurrency() - 1;
+        if (threads == 0) {
+            // try to guess the number of concurrent threads supported by the machine
+            threads = thread::hardware_concurrency() - 1;
         }
         
-        A_1 = A_1Degs / 180 * pi;
-        A_1A_2Dir = point(interval(1), interval(0));
-        A_1A_3Dir = point(cos(A_1), sin(A_1));
-        sumAlphaBeta = pi * 2 / 3 + A_1 / 2;
-        d = 1 / sin60 / sin(A_1 / 2) + 2 + cos(A_1 / 2) / sin(A_1 / 2) + 1;
-
-        x_0 = y_0 = 1 / sin(A_1 / 2);
-        alpha_0 = sumAlphaBeta / 2;
+        // calculate L_0
         cyclePart optC(x_0, x_0, alpha_0, this);
-        minLength = optC.len + optC.V.len() - 1;
+        L_0 = optC.len + optC.V.len() - 1;
 
-        // cerr << SetPrecision(18, 15);
-        // // print H(Sigma_0 \cap ANGLE) to the terminal
-        // cerr << "H(Sigma_0 \\cap ANGLE): " << minLength << '\n';
-
-        deltas = vector<point6d>(cutoffDepth + 1);
-        deltas[0] = point6d(d - 1, d - 1, pi - sumAlphaBeta, A_1, pi / 2, pi / 2) * (interval(1) / k / 2);
-        for (int i = 1; i <= cutoffDepth; ++i) {
-            deltas[i] = deltas[i - 1] * interval(0.5);
+        // initialize delta and shift arrays
+        deltas = vector<point6d>(maxDepth);
+        deltas[0] = point6d(d - 1, d - 1, pi / 12, pi / 2, pi / 2, pi / 2) * cos60;
+        for (int i = 1; i < maxDepth; ++i) {
+            deltas[i] = deltas[i - 1] * cos60;
         }
 
-        shift = vector<vector<point6d> >(cutoffDepth, vector<point6d>(64));
-        for (int i = 0; i < cutoffDepth; ++i) {
+        shift = vector<vector<point6d> >(maxDepth, vector<point6d>(64));
+        for (int i = 0; i < maxDepth; ++i) {
             for (int j = 0; j < 64; ++j) {
                 shift[i][j].x     = deltas[i + 1].x     * ((j & 1)  ? 1 : -1);
                 shift[i][j].y     = deltas[i + 1].y     * ((j & 2)  ? 1 : -1);
                 shift[i][j].alpha = deltas[i + 1].alpha * ((j & 4)  ? 1 : -1);
-                shift[i][j].xi_up = deltas[i + 1].xi_up * ((j & 8)  ? 1 : -1);
+                shift[i][j].xi    = deltas[i + 1].xi    * ((j & 8)  ? 1 : -1);
                 shift[i][j].xi_1  = deltas[i + 1].xi_1  * ((j & 16) ? 1 : -1);
                 shift[i][j].xi_2  = deltas[i + 1].xi_2  * ((j & 32) ? 1 : -1);
             }
         }
 
-        pool.init(progressKeeper.threads, this);
+        for (int i = 0; i < maxDepth; ++i) {
+            lastTaskTaken[i] = start;
+        }
+
+        // initialize thread pool
+        pool.init(threads, this);
     }
 
-    // consider the hyperrectangle [t.x - delta.x, t.x + delta.x] x [t.y - delta.y, t.y + delta.y] x
-    // [t.alpha - delta.alpha, t.alpha + delta.alpha] x [t.xi_up - delta.xi_up, t.xi_up + delta.xi_up] x
-    // [t.xi_1 - delta.xi_1, t.xi_1 + delta.xi_1] x [t.xi_2 - delta.xi_2, t.xi_2 + delta.xi_2],
-    // where delta = deltas[depth];
-    // if L(t) < minLength + error, divide the hyperrectangle into 64 smaller hyperrectangles and
-    // call this function recursively for each of them
-    //
-    // return maximum reached depth
-    //
-    // stop if recursion depth exceeds cutoffDepth
-    int checkHyperrectangle(const point6d & t, Melzak & melzak, int depth, int id) {
-        progressKeeper.currentDepth[id] = depth;
-        progressKeeper.casesLeft[id][depth] = 0;
-
+    // consider the box P(c, delta), where delta = deltas[depth];
+    // if L(c) - Err(c, delta) < L_0, divide the box into 64 smaller boxes
+    // and add a task for each of them;
+    void checkBox(const point6d & c, Melzak & melzak, int depth) {
         point6d & delta = deltas[depth];
 
-        if (Sup(abs(t.x - x_0) + delta.x) < Inf(radiusXY) && Sup(abs(t.y - y_0) + delta.y) < Inf(radiusXY) && Sup(abs(t.alpha - alpha_0) + delta.alpha) < Inf(radiusAlpha)) {
-            // |x - x_0| < radiusXY, |y - y_0| < radiusXY, and |alpha - alpha_0| < radiusAlpha
-            // for each point in the hyperrectangle
-            return depth;
+        if (getSign(radXY - delta.x - abs(c.x - x_0)) == 1 &&
+            getSign(radXY - delta.y - abs(c.y - y_0)) == 1 &&
+            getSign(radAlpha - delta.alpha - abs(c.alpha - alpha_0)) == 1) {
+            // P(c, delta) is contained in P_0
+            return;
         }
-        if (Sup(power(t.x + delta.x, 2) + power(t.y + delta.y, 2) - 2 * (t.x + delta.x) * (t.y + delta.y) * cos(A_1)) < 4) {
-            // B_r(y(W_1)) intersects B_r(y(W_2)) for each point in the hyperrectangle
-            return depth;
+        if (getSign(4 - power(c.x + delta.x, 2) - power(c.y + delta.y, 2)) == 1) {
+            // B_r(y(W_1)) intersects B_r(y(W_2)) for each point in the box
+            return;
         }
       
-        // calculate L(t)
-        cyclePart b(t.x, t.y, t.alpha, this);
+        cyclePart cycle(c.x, c.y, c.alpha, this);
 
-        interval beta = sumAlphaBeta - t.alpha;
+        interval beta = sumAlphaBeta - c.alpha;
 
         point p[4];
-        p[0] = b.V;
-        p[1] = point(cos(t.xi_up), sin(t.xi_up));
-        p[2] = A_1A_2Dir * t.x + point(cos(t.xi_1), sin(t.xi_1));
-        p[3] = A_1A_3Dir * t.y + point(cos(t.xi_2), sin(t.xi_2));
+        p[0] = cycle.V;
+        p[1] = point(cos(c.xi), sin(c.xi));
+        p[2] = point(c.x - cos(c.xi_1), sin(c.xi_1));
+        p[3] = point(sin(c.xi_2), c.y - cos(c.xi_2));
 
-        interval length = melzak.solve(p) + b.len;
+        // length = L(c)
+        interval length = melzak.solve(p) + cycle.len;
 
-        if (Inf(length) < Inf(minLength)) {
-            cerr << "\33[2J\33[H" << depth << ' ' << length << '\n';
-            cerr << length - b.len << '\n';
-            cerr.flush();
-            throw runtime_error("too small");
-        }
+        // calculate Err(c, delta)
+        interval M1 =  (4 * (c.x - delta.x) * cos(2 * (beta - delta.alpha)) + 4 * (c.y + delta.y) * sin(2 * (beta - delta.alpha)));
+        M1 +=  (4 * sin(beta + delta.alpha) + 3 * cos(c.alpha + 2 * beta + delta.alpha) - cos(3 * c.alpha + 2 * beta + delta.alpha));
+        interval M2 = -(4 * (c.x + delta.x) * cos(2 * (beta + delta.alpha)) + 4 * (c.y - delta.y) * sin(2 * (beta + delta.alpha)));
+        M2 += -(4 * sin(beta - delta.alpha) + 3 * cos(c.alpha + 2 * beta - delta.alpha) - cos(3 * c.alpha + 2 * beta - delta.alpha));
+        interval dV = mymax(interval(0), mymax(M1, M2)) * delta.alpha * interval(2) / interval(3);
+        dV += delta.x * sin(2 * (c.alpha - delta.alpha)) / sin60 + delta.y * sin(2 * (beta - delta.alpha)) / sin60;
+        interval Err = delta.xi_1 + delta.xi_2 + delta.xi + dV;
 
-        // calculate error
-        interval error = delta.xi_1 + delta.xi_2 + delta.xi_up;
-        interval dV = 2 / sin60 * ((b.Z_1W_1.o - b.Z_2W_2.o).len() + (cos(t.alpha - delta.alpha) + cos(beta - delta.alpha)) / 2) * delta.alpha;
-        dV += delta.x * sin(2 * (t.alpha - delta.alpha)) / sin60 + delta.y * sin(2 * (beta - delta.alpha)) / sin60;
-        error += dV;
-        interval dW_1 = delta.x + delta.alpha, dW_2 = delta.y + delta.alpha;
-        error += 2 * (dW_1 * cos(t.alpha - delta.alpha) + dW_2 * cos(beta - delta.alpha) + dV * cos60);
+        Err += (1 - sin(2 * (c.alpha - delta.alpha) - 2 * pi / 3) / sin60) * delta.x;
+        Err += (1 - cos(2 * (c.alpha + delta.alpha) - 2 * pi / 3) / sin60) * delta.y;
 
-        if (Inf(length) > Sup(minLength + error)) {
-            // the inequality is verified for every point in the hyperrectangle
-            return depth;
-        }
-
-        if (depth == cutoffDepth) {
-            // cutoffDepth exceeded; stop
-            return cutoffDepth + 1;
-        }
-
-        int reachedDepth = depth;
-
-        progressKeeper.casesLeft[id][depth] = 64;
-        // make recursive calls
-        for (int i = 0; i < 64; ++i) {
-            point6d nt = t + shift[depth][i];
-
-            reachedDepth = max(reachedDepth, checkHyperrectangle(nt, melzak, depth + 1, id));
-            --progressKeeper.casesLeft[id][depth];
-            if (reachedDepth == cutoffDepth + 1) {
-                // cutoffDepth exceeded; stop
-                return reachedDepth;
-            }
-        }
-
-        return reachedDepth;
-    }
-
-    // verify the initial hyperrectangle with center at t;
-    // id is the identifier of the used thread
-    void verify(point6d t, int id) {
-        Melzak melzak;
-        progressKeeper.setThreadStart(id);
-        int reachedDepth = checkHyperrectangle(t, melzak, 0, id);
-        progressKeeper.currentDepth[id] = -1;
-        ++progressKeeper.tasksFinished[reachedDepth];
-        ++progressKeeper.tasksFinishedAnyDepth;
-    }
-
-    // create a task for each initial hyperrectangle;
-    // because of symmetry it is sufficient to consider only hyperrectangles with the center at point with x >= y
-    void addTasks() {
-        point6d t;
+        interval F1 =  sin(c.alpha + delta.alpha) - sin(beta - delta.alpha);
+        F1 += (2 * (c.x + delta.x) * cos(2 * (c.alpha - delta.alpha) - 2 * pi / 3) - 2 * (c.y - delta.y) * sin(2 * (c.alpha - delta.alpha) - 2 * pi / 3)) / sin60;
+        F1 += (-sin(c.alpha - delta.alpha - pi / 6) + cos(c.alpha - delta.alpha - pi / 4)) / sin60;
+        interval F2 = -sin(c.alpha - delta.alpha) + sin(beta + delta.alpha);
+        F2 -= (2 * (c.x - delta.x) * cos(2 * (c.alpha + delta.alpha) - 2 * pi / 3) - 2 * (c.y + delta.y) * sin(2 * (c.alpha + delta.alpha) - 2 * pi / 3)) / sin60;
+        F2 -= (-sin(c.alpha + delta.alpha - pi / 6) + cos(c.alpha + delta.alpha - pi / 4)) / sin60;
+        Err += mymax(interval(0), mymax(F1, F2)) * delta.alpha;
         
-        progressKeeper.tasksTotal = 0;
-        for (int xi = 0; xi < k; ++xi) {
-            t.x = deltas[0].x * (2 * xi + 1);
-            for (int yi = 0; yi <= xi; ++yi) {
-                t.y = deltas[0].y * (2 * yi + 1);
-                for (int alphai = 0; alphai < k; ++alphai) {
-                    t.alpha = sumAlphaBeta - pi / 2 + deltas[0].alpha * (2 * alphai + 1);
-                    for (int xi_upi = 0; xi_upi < k; ++xi_upi) {
-                        t.xi_up = deltas[0].xi_up * (2 * xi_upi + 1);
-                        for (int xi_1i = 0; xi_1i < k; ++xi_1i) {
-                            t.xi_1 = pi / 2 + deltas[0].xi_1 * (2 * xi_1i + 1);
-                            for (int xi_2i = 0; xi_2i < k; ++xi_2i) {
-                                t.xi_2 = pi + A_1 + deltas[0].xi_2 * (2 * xi_2i + 1);
-                                ++progressKeeper.tasksTotal;
-                                pool.Enqueue(t);
-                            }
-                        }
-                    }
+        if (getSign(length - Err - L_0) == 1) {
+            // the inequality is verified for every point in the box
+            return;
+        }
+
+        // add new tasks
+        tasksToProcess[depth + 1] += 64;
+        for (int i = 0; i < 64; ++i) {
+            point6d nc = c + shift[depth][i];
+            pool.addTask(nc, depth + 1);
+        }
+
+        return;
+    }
+
+    // if there is no save file detected, add the initial task;
+    // if there is a save file, load the amount of tasks processed and current stack for each depth
+    void addTasks() {
+        ifstream saveFile("save.txt");
+        if (saveFile.is_open()) {
+            string line;
+            {
+                getline(saveFile, line);
+                istringstream iss(line);
+                for (int i = 0; i < maxDepth; ++i) {
+                    long long tmp;
+                    iss >> tmp;
+                    tasksProcessed[i] = tmp;
                 }
             }
+            while (getline(saveFile, line)) {
+                istringstream iss(line);
+                point6d t;
+                int depth;
+                iss >> t >> depth;
+                pool.addTask(t, depth);
+                ++tasksToProcess[depth];
+            }
+            saveFile.close();
+        } else {
+            point6d t = deltas[0];
+            t.alpha += sumAlphaBeta - pi / 2;
+            ++tasksToProcess[0];
+            pool.addTask(t, 0);
         }
     }
 } verifier;
 
 
 int main(int argc, char** argv) {
-    if (argc != 7) {
+    if (argc != 2) {
         eprintf("Wrong number of arguments\n");
         exit(1);
     }
+
     verifier.init(argv);
     verifier.addTasks();
-    verifier.progressKeeper.show(&verifier);
+    verifier.show();
+    verifier.save();
     return 0;
 }
