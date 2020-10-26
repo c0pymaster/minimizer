@@ -12,6 +12,6 @@ After compilation, the program can be run as follows:
 ```
 where t is the number of threads you would like to use. If t=0, the program will try to guess the number of concurrent threads supported by the machine.
 
-[Error](https://github.com/c0pymaster/minimizer/blob/master/Error.ipynb) contains the symbolic computations used in the proof of Proposition 5.2 of the paper. For some reason GitHub does not display the contents of file properly at least in some browsers; you can view the whole contents of the file [here](https://nbviewer.jupyter.org/github/c0pymaster/minimizer/blob/master/Error.ipynb).
+[Error](https://github.com/c0pymaster/minimizer/blob/master/Error.ipynb) contains the symbolic computations used in the proof of Proposition 5.2 of the paper. For some reason GitHub does not display the contents of the file properly at least in some browsers; you can view the whole contents of the file [here](https://nbviewer.jupyter.org/github/c0pymaster/minimizer/blob/master/Error.ipynb).
 
-[Case4](https://github.com/c0pymaster/minimizer/blob/master/Case4.ipynb) contains the computations used in case 4 in section 6 of the paper.
+[Case4](https://github.com/c0pymaster/minimizer/blob/master/Case4.ipynb) contains the computations used in case 4 in Section 6 of the paper.
