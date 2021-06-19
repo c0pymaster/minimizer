@@ -1,4 +1,4 @@
-This repository contains supplementary files to the paper "Maximal distance minimizers for a rectangle" https://arxiv.org/abs/2106.00809.
+This repository contains supplementary files to the paper ["Maximal distance minimizers for a rectangle"](https://arxiv.org/abs/2106.00809).
 
 [verifier folder](https://github.com/c0pymaster/minimizer/tree/master/verifier) contains the source code of the computer search program described in the paper. It can be compiled as follows:
 ```
