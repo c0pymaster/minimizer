@@ -23,6 +23,10 @@
 
 const int maxDepth = 20;
 
+const interval C1 = cos(11 * pi / 24) + (cos(11 * pi / 8) + sin(11 * pi / 24)) / sin60;
+const interval C2 = power(3 * cos(17 * pi / 24), 2) + power(cos(13 * pi / 8), 2);
+const interval C3 = 6 * cos(17 * pi / 24) * cos(13 * pi / 8);
+
 using namespace std;
 using namespace cxsc;
 
@@ -388,23 +392,21 @@ struct Verifier {
         interval length = melzak.solve(p) + cycle.len;
 
         // calculate Err(c, delta)
-        interval M1 =  (4 * (c.x - delta.x) * cos(2 * (beta - delta.alpha)) + 4 * (c.y + delta.y) * sin(2 * (beta - delta.alpha)));
-        M1 +=  (4 * sin(beta + delta.alpha) + 3 * cos(c.alpha + 2 * beta + delta.alpha) - cos(3 * c.alpha + 2 * beta + delta.alpha));
-        interval M2 = -(4 * (c.x + delta.x) * cos(2 * (beta + delta.alpha)) + 4 * (c.y - delta.y) * sin(2 * (beta + delta.alpha)));
-        M2 += -(4 * sin(beta - delta.alpha) + 3 * cos(c.alpha + 2 * beta - delta.alpha) - cos(3 * c.alpha + 2 * beta - delta.alpha));
-        interval dV = mymax(interval(0), mymax(M1, M2)) * delta.alpha * interval(2) / interval(3);
+        interval dV = 2 * sqrt(power(c.x + delta.x, 2) + power(c.y + delta.y, 2));
+        dV += sqrt(C2 - C3 * cos(2 * abs(c.alpha - 11 * pi / 24) + 2 * delta.alpha));
+        dV *= delta.alpha / sin60;
+        
         dV += delta.x * sin(2 * (c.alpha - delta.alpha)) / sin60 + delta.y * sin(2 * (beta - delta.alpha)) / sin60;
         interval Err = delta.xi_1 + delta.xi_2 + delta.xi + dV;
 
         Err += (1 - sin(2 * (c.alpha - delta.alpha) - 2 * pi / 3) / sin60) * delta.x;
         Err += (1 - cos(2 * (c.alpha + delta.alpha) - 2 * pi / 3) / sin60) * delta.y;
 
-        interval F1 =  sin(c.alpha + delta.alpha) - sin(beta - delta.alpha);
-        F1 += (2 * (c.x + delta.x) * cos(2 * (c.alpha - delta.alpha) - 2 * pi / 3) - 2 * (c.y - delta.y) * sin(2 * (c.alpha - delta.alpha) - 2 * pi / 3)) / sin60;
-        F1 += (-sin(c.alpha - delta.alpha - pi / 6) + cos(c.alpha - delta.alpha - pi / 4)) / sin60;
-        interval F2 = -sin(c.alpha - delta.alpha) + sin(beta + delta.alpha);
-        F2 -= (2 * (c.x - delta.x) * cos(2 * (c.alpha + delta.alpha) - 2 * pi / 3) - 2 * (c.y + delta.y) * sin(2 * (c.alpha + delta.alpha) - 2 * pi / 3)) / sin60;
-        F2 -= (-sin(c.alpha + delta.alpha - pi / 6) + cos(c.alpha + delta.alpha - pi / 4)) / sin60;
+        interval F1 =  (c.x + delta.x) * cos(2 * (c.alpha - delta.alpha) - 2 * pi / 3) - (c.y - delta.y) * sin(2 * (c.alpha - delta.alpha) - 2 * pi / 3);
+        F1 = F1 * 2 / sin60 + 2 * C1 * sin((c.alpha - beta) / 2 + delta.alpha);
+        interval F2 = -(c.x - delta.x) * cos(2 * (c.alpha + delta.alpha) - 2 * pi / 3) + (c.y + delta.y) * sin(2 * (c.alpha + delta.alpha) - 2 * pi / 3);
+        F2 = F2 * 2 / sin60 - 2 * C1 * sin((c.alpha - beta) / 2 - delta.alpha);
+        
         Err += mymax(interval(0), mymax(F1, F2)) * delta.alpha;
         
         if (getSign(length - Err - L_0) == 1) {
