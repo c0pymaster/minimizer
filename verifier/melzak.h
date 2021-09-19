@@ -12,11 +12,6 @@ using namespace cxsc;
 
 // This is the implementation of the Melzak algorithm with additional assumption that the number of given points is 4.
 
-// Note that the reconstruction phase is considered successful if the result of some checks could not be determined
-// (that usually happens if some points are very close to each other).
-// It means that the algorithm can return the length smaller that the real length of Steiner tree on given points.
-// This is fine since we are only interested in the lower bound on this length.
-
 // Steiner tree on 4 points contains no more than 6 points (4 given points + 2 Steiner points)
 const int maxn = 6;
 
@@ -24,25 +19,23 @@ struct Melzak {
 	point p[maxn];
 
 	// the reconstruction step of the Melzak algorithm;
-	// returns true if the reconstruction is successfull
-	// (also returns true if the result of some of the checks could not be determined)
+	// returns true if the reconstruction is successful
 	bool reconstruct(int s, int a, int b, int v) {
 		// construct the circle through points p[a], p[b], p[s]
 		point o;
 		interval r;
 		getCircle(p[a], p[b], p[s], o, r);
 
-		if (getSign((p[s] - p[v]).len()) == 0) {
-			// p[s] and p[v] are too close to each other to construct a line through them;
-			// assume that the reconstruction is successful
-			return true;
+		line l(p[a], p[b]);
+
+		if (l.getSide(p[s]) * l.getSide(p[v]) == 1) {
+			// reconstruction phase failed since p[s] and p[v] are on the same side of line l
+			return false;
 		}
 
 		// find the intersection of the circle and the line which goes through p[s] and p[v]
 		point res[2];
 		intersect(line(p[s], p[v]), o, r, res);
-
-		line l(p[a], p[b]);
 
 		// if one of the intersection points is inside both the segment between p[s] and p[v], and the smaller arc between p[a] and p[b],
 		// then this point is the desired Steiner point; otherwise, the reconstruction phase failed
@@ -73,7 +66,7 @@ struct Melzak {
 	// the merge phase of the Melzak algorithm
 	//
 	// returns the length of the full local Steiner tree on points p[0], ..., p[n - 1] for the given topology,
-	// or infinity, if the such tree does not exist;
+	// or infinity, if such tree does not exist;
 	//
 	// if n = 3, the only possible topology is the following: Steiner point 3 is connected with points 0, 1, 2;
 	//

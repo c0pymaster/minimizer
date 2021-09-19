@@ -24,7 +24,7 @@ interval mymax(const interval & a, const interval & b) {
 	return interval(max(Inf(a), Inf(b)), max(Sup(a), Sup(b)));
 }
 
-// return the sign of real number x;
+// return the sign of a real number x;
 // if the sign cannot be determined, return 0
 int getSign(const interval & x) {
 	if (Inf(x) <= 0 and 0 <= Sup(x)) { // sign cannot be determined
@@ -106,6 +106,17 @@ struct point {
 	}
 };
 
+ostream & operator <<(ostream & os, const point & p) {
+   os << p.x << ' ' << p.y;
+   return os;
+}
+
+istream & operator >>(istream & is, point & p) {
+    is >> p.x >> p.y;
+    return is;
+}
+
+
 // a line on a plane, described by a vector equation o + v * t, where t is the parameter
 struct line {
 	point o, v;
@@ -142,7 +153,7 @@ void intersect(const line & l, const point & o, const interval & r, point res[2]
 		res[it] = o + n * d + l.v * (it ? -x : x);
 
 		// found points should lie both on the circle and on the line
-		assert(getSign(r - (o - res[it]).len()) == 0 && getSign(l.dist(res[it])) == 0);
+		assert(getSign(r - (o - res[it]).len()) == 0 && l.getSide(res[it]) == 0);
 	}
 }
 
@@ -158,7 +169,7 @@ point intersect(const line & a, const line & b) {
 	point res = a.v * ka + b.v * kb;
 
 	// found point should lie on both given lines
-	assert(getSign(a.dist(res)) == 0 && getSign(b.dist(res)) == 0);
+	assert(a.getSide(res) == 0 && b.getSide(res) == 0);
 
 	return res;
 }
